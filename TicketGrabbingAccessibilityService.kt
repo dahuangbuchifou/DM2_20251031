@@ -6,8 +6,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.os.Handler
-import android.os.Looper
+import android.os.Build
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -34,14 +33,13 @@ class TicketGrabbingAccessibilityService : AccessibilityService() {
 
     private var currentTask: TicketTask? = null
     private var serviceJob: Job? = null
-    private val captchaRecognitionService = CaptchaRecognitionService()
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private lateinit var networkManager: TicketGrabbingNetworkManager
 
     private val grabbingReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action == "com.damaihelper.START_GRABBING") {
-                val task = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                val task = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     intent.getParcelableExtra("task", TicketTask::class.java)
                 } else {
                     @Suppress("DEPRECATION")
@@ -76,8 +74,13 @@ class TicketGrabbingAccessibilityService : AccessibilityService() {
             networkManager.initialize()
         }
 
+        // 注册广播接收器
         val filter = IntentFilter("com.damaihelper.START_GRABBING")
-        registerReceiver(grabbingReceiver, filter, RECEIVER_EXPORTED) // ⚠️ 修复点：添加 RECEIVER_EXPORTED 避免 API 33+ 崩溃
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(grabbingReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(grabbingReceiver, filter)
+        }
     }
 
     override fun onDestroy() {
@@ -102,7 +105,7 @@ class TicketGrabbingAccessibilityService : AccessibilityService() {
                     if (info != null && info.detected) {
                         TooManyPeopleHandler.executeHighFrequencyClicking(this@TicketGrabbingAccessibilityService, info)
                     } else {
-                        // 检测其他通用弹窗，如“知道了”、“确定”等
+                        // 检测其他通用弹窗，如"知道了"、"确定"等
                         handleGenericDialog(rootNode)
                     }
                     rootNode.recycle()
@@ -117,19 +120,18 @@ class TicketGrabbingAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * 处理通用弹窗，例如包含“确定”、“知道了”等按钮的弹窗。
+     * 处理通用弹窗，例如包含"确定"、"知道了"等按钮的弹窗。
      */
     private fun handleGenericDialog(rootNode: AccessibilityNodeInfo) {
         val positiveButtonKeywords = listOf("确定", "知道了", "允许", "同意", "OK", "Confirm", "Allow", "Agree")
-        // val negativeButtonKeywords = listOf("取消", "以后再说", "拒绝", "Cancel", "Deny") // 移除未使用的变量
 
         for (keyword in positiveButtonKeywords) {
-            val button = NodeUtils.findNodeByText(rootNode, keyword, clickable = true)
+            val button = findNodeByText(rootNode, keyword, clickable = true)
             if (button != null) {
                 Log.d(TAG, "检测到通用弹窗，点击正面按钮: $keyword")
                 button.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 button.recycle()
-                return // 通常处理一个弹窗后即可返回
+                return
             }
         }
     }
@@ -212,7 +214,12 @@ class TicketGrabbingAccessibilityService : AccessibilityService() {
         }
 
         // 尝试通过API抢票（如果可能）
-        val ticketRequest = TicketRequest(itemId = task.itemId, sessionId = task.sessionId, priceId = task.priceId, quantity = task.quantity)
+        val ticketRequest = TicketRequest(
+            itemId = task.itemId,
+            sessionId = task.sessionId,
+            priceId = task.priceId,
+            quantity = task.quantity
+        )
         val apiResult = networkManager.executeConcurrentTicketGrabbing(ticketRequest)
 
         if (apiResult.success) {
@@ -257,13 +264,13 @@ class TicketGrabbingAccessibilityService : AccessibilityService() {
                     rootNode.recycle()
                     if (clickResult.success) {
                         Log.d(TAG, "高频点击成功跳出，继续流程")
-                        return true // 假设跳出后就是选票页面
+                        return true
                     }
                 } else {
                     rootNode.recycle()
                 }
             }
-            HumanBehaviorSimulator.delayedAction(DelayType.QUICK) {}
+            delay(HumanBehaviorSimulator.generateRandomDelay(300, 800))
         }
         return false
     }
@@ -273,7 +280,7 @@ class TicketGrabbingAccessibilityService : AccessibilityService() {
         if (launchIntent != null) {
             launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             startActivity(launchIntent)
-            HumanBehaviorSimulator.delayedAction(DelayType.LONG) { /* 等待App启动 */ }
+            Thread.sleep(3000) // 等待App启动
             return true
         }
         Log.e(TAG, "无法找到大麦App")
@@ -289,13 +296,12 @@ class TicketGrabbingAccessibilityService : AccessibilityService() {
         operation: suspend () -> Boolean
     ): Boolean {
         repeat(maxRetries) { attempt ->
-            Log.d(TAG, "$operationName - 尝试 $attempt/${maxRetries}")
+            Log.d(TAG, "$operationName - 尝试 ${attempt + 1}/$maxRetries")
             if (operation()) {
                 Log.d(TAG, "$operationName - 成功")
                 return true
             }
-            // 模拟人类重试前的短暂犹豫
-            HumanBehaviorSimulator.delayedAction(DelayType.SHORT) {}
+            delay(HumanBehaviorSimulator.generateRandomDelay(500, 1500))
         }
         Log.e(TAG, "$operationName - 失败，达到最大重试次数")
         return false
@@ -305,50 +311,48 @@ class TicketGrabbingAccessibilityService : AccessibilityService() {
         return withContext(Dispatchers.Main) {
             val rootNode = rootInActiveWindow ?: return@withContext false
 
-            HumanBehaviorSimulator.simulateThinking()
+            delay(HumanBehaviorSimulator.generateRandomDelay(500, 1500))
 
-            val searchBox = NodeUtils.findNodeByText(rootNode, SEARCH_HINT)
+            val searchBox = findNodeByText(rootNode, SEARCH_HINT)
             if (searchBox != null) {
-                HumanBehaviorSimulator.simulateClick(searchBox)
-                HumanBehaviorSimulator.delayedAction(DelayType.TYPING) {
-                    searchBox.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT,
-                        android.os.Bundle().apply {
-                            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, concertName)
-                        })
+                searchBox.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                delay(800)
+
+                val arguments = android.os.Bundle().apply {
+                    putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, concertName)
                 }
+                searchBox.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments)
+
                 searchBox.recycle()
                 rootNode.recycle()
                 return@withContext true
             }
-            // 尝试查找搜索按钮并点击
-            val searchButton = NodeUtils.findClickableNodeByText(rootNode, "搜索")
+
+            val searchButton = findNodeByText(rootNode, "搜索", clickable = true)
             if (searchButton != null) {
-                HumanBehaviorSimulator.simulateClick(searchButton)
+                searchButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 searchButton.recycle()
                 rootNode.recycle()
                 return@withContext true
             }
 
-            // 尝试查找搜索图标并点击 (需要图像识别或更复杂的定位)
-
             rootNode.recycle()
             return@withContext false
         }
-    } // 修复点 1：添加缺失的右花括号 '}'
+    }
 
     /**
      * 进入演出详情页的UI操作
      */
-    private suspend fun enterConcertDetail(): Boolean { // 修复点 2：将粘连的代码块分离并命名
+    private suspend fun enterConcertDetail(): Boolean {
         return withContext(Dispatchers.Main) {
             val rootNode = rootInActiveWindow ?: return@withContext false
 
-            HumanBehaviorSimulator.simulateBrowsing()
+            delay(HumanBehaviorSimulator.generateRandomDelay(1000, 2000))
 
-            // 查找第一个搜索结果并点击
-            val firstResult = NodeUtils.findFirstClickableNode(rootNode)
+            val firstResult = findFirstClickableNode(rootNode)
             if (firstResult != null) {
-                HumanBehaviorSimulator.simulateClick(firstResult)
+                firstResult.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 firstResult.recycle()
                 rootNode.recycle()
                 return@withContext true
@@ -373,8 +377,7 @@ class TicketGrabbingAccessibilityService : AccessibilityService() {
 
                 val success = CaptchaHandler.handleCaptcha(
                     this@TicketGrabbingAccessibilityService,
-                    captchaInfo,
-                    captchaRecognitionService
+                    captchaInfo
                 )
 
                 if (success) {
@@ -382,6 +385,7 @@ class TicketGrabbingAccessibilityService : AccessibilityService() {
                     delay(2000)
                 } else {
                     Log.e(TAG, "验证码处理失败，需要用户手动处理")
+                    rootNode.recycle()
                     return@withContext false
                 }
             }
@@ -395,13 +399,12 @@ class TicketGrabbingAccessibilityService : AccessibilityService() {
         return withContext(Dispatchers.Main) {
             val rootNode = rootInActiveWindow ?: return@withContext false
 
-            HumanBehaviorSimulator.simulateInformationCheck()
+            delay(HumanBehaviorSimulator.generateRandomDelay(500, 1000))
 
-            val buyButton = NodeUtils.findNodeByText(rootNode, BUY_NOW_TEXT)
+            val buyButton = findNodeByText(rootNode, BUY_NOW_TEXT)
             if (buyButton != null) {
-                HumanBehaviorSimulator.simulateHesitation()
-
-                HumanBehaviorSimulator.simulateClick(buyButton)
+                delay(HumanBehaviorSimulator.generateRandomDelay(200, 500))
+                buyButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 buyButton.recycle()
                 rootNode.recycle()
                 return@withContext true
@@ -412,33 +415,28 @@ class TicketGrabbingAccessibilityService : AccessibilityService() {
         }
     }
 
-    private suspend fun selectSessionAndPrice(task: TicketTask) {
-        withContext(Dispatchers.Main) {
-            val rootNode = rootInActiveWindow ?: return@withContext
+    private suspend fun selectSessionAndPrice(task: TicketTask): Boolean {
+        return withContext(Dispatchers.Main) {
+            val rootNode = rootInActiveWindow ?: return@withContext false
 
-            HumanBehaviorSimulator.simulateDecisionMaking()
+            delay(HumanBehaviorSimulator.generateRandomDelay(800, 1500))
 
-            // 修复点 3：使用 findNodeByTextAndClick 函数简化代码
-            NodeUtils.findNodeByTextAndClick(rootNode, task.sessionPreference ?: SELECT_SESSION_TEXT)
-            HumanBehaviorSimulator.delayedAction(DelayType.MEDIUM) {}
-            NodeUtils.findNodeByTextAndClick(rootNode, task.pricePreference ?: SELECT_PRICE_TEXT)
-
-            // 旧代码：
-            /*
-            val sessionButton = NodeUtils.findNodeByText(rootNode, task.sessionPreference ?: SELECT_SESSION_TEXT)
-            sessionButton?.let {
-                HumanBehaviorSimulator.simulateClick(it)
-                it.recycle()
+            val sessionButton = findNodeByText(rootNode, task.sessionPreference ?: SELECT_SESSION_TEXT)
+            if (sessionButton != null) {
+                sessionButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                sessionButton.recycle()
             }
-            HumanBehaviorSimulator.delayedAction(DelayType.MEDIUM) {}
-            val priceButton = NodeUtils.findNodeByText(rootNode, task.pricePreference ?: SELECT_PRICE_TEXT)
-            priceButton?.let {
-                HumanBehaviorSimulator.simulateClick(it)
-                it.recycle()
+
+            delay(HumanBehaviorSimulator.generateRandomDelay(500, 1000))
+
+            val priceButton = findNodeByText(rootNode, task.pricePreference ?: SELECT_PRICE_TEXT)
+            if (priceButton != null) {
+                priceButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                priceButton.recycle()
             }
-            */
 
             rootNode.recycle()
+            return@withContext true
         }
     }
 
@@ -450,12 +448,11 @@ class TicketGrabbingAccessibilityService : AccessibilityService() {
                 return@withContext false
             }
 
-            HumanBehaviorSimulator.simulateInformationCheck()
+            delay(HumanBehaviorSimulator.generateRandomDelay(500, 1000))
 
-            val submitButton = NodeUtils.findNodeByText(rootNode, SUBMIT_ORDER_TEXT)
+            val submitButton = findNodeByText(rootNode, SUBMIT_ORDER_TEXT)
             if (submitButton != null) {
-                HumanBehaviorSimulator.simulateHesitation()
-
+                delay(HumanBehaviorSimulator.generateRandomDelay(300, 700))
                 submitButton.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 submitButton.recycle()
                 rootNode.recycle()
@@ -475,5 +472,68 @@ class TicketGrabbingAccessibilityService : AccessibilityService() {
             putExtra("message", message)
         }
         sendBroadcast(intent)
+    }
+
+    // ========== 辅助工具方法 ==========
+
+    /**
+     * 根据文本查找节点
+     */
+    private fun findNodeByText(
+        rootNode: AccessibilityNodeInfo,
+        text: String,
+        clickable: Boolean = false
+    ): AccessibilityNodeInfo? {
+        val lowerText = text.lowercase()
+        return findNodeByTextRecursive(rootNode, lowerText, clickable)
+    }
+
+    private fun findNodeByTextRecursive(
+        node: AccessibilityNodeInfo,
+        lowerText: String,
+        clickable: Boolean
+    ): AccessibilityNodeInfo? {
+        if (clickable && !node.isClickable) {
+            // 如果需要可点击节点，但当前节点不可点击，跳过
+        } else {
+            val nodeText = node.text?.toString()?.lowercase()
+            if (nodeText != null && nodeText.contains(lowerText)) {
+                return node
+            }
+
+            val contentDesc = node.contentDescription?.toString()?.lowercase()
+            if (contentDesc != null && contentDesc.contains(lowerText)) {
+                return node
+            }
+        }
+
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i)
+            if (child != null) {
+                val found = findNodeByTextRecursive(child, lowerText, clickable)
+                if (found != null) return found
+            }
+        }
+
+        return null
+    }
+
+    /**
+     * 查找第一个可点击节点
+     */
+    private fun findFirstClickableNode(rootNode: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        if (rootNode.isClickable) {
+            return rootNode
+        }
+
+        for (i in 0 until rootNode.childCount) {
+            val child = rootNode.getChild(i)
+            if (child != null) {
+                val found = findFirstClickableNode(child)
+                if (found != null) return found
+            }
+        }
+
+        return null
     }
 }

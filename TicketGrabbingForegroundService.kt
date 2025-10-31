@@ -8,7 +8,6 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.damaihelper.R
 import com.damaihelper.model.TicketTask
 import com.damaihelper.utils.PreciseTimeManager
 import kotlinx.coroutines.*
@@ -253,7 +252,15 @@ class TicketGrabbingForegroundService : Service() {
      * 创建通知
      */
     private fun createNotification(task: TicketTask, status: String): Notification {
-        val intent = Intent(this, Class.forName("com.damaihelper.ui.MainActivity"))
+        // 修复：尝试安全地获取 MainActivity 类
+        val intent = try {
+            Intent(this, Class.forName("com.damaihelper.MainActivity"))
+        } catch (e: ClassNotFoundException) {
+            // 如果找不到 MainActivity，创建一个空的 Intent
+            Log.w(TAG, "MainActivity 未找到，使用默认 Intent")
+            Intent()
+        }
+
         val pendingIntent = PendingIntent.getActivity(
             this, 0, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -262,7 +269,7 @@ class TicketGrabbingForegroundService : Service() {
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("大麦抢票助手")
             .setContentText("${task.concertName} - $status")
-            .setSmallIcon(R.drawable.ic_notification)
+            .setSmallIcon(android.R.drawable.ic_dialog_info) // 修复：使用系统默认图标
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setSilent(true)
